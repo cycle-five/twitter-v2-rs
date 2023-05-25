@@ -1,17 +1,21 @@
 use axum::{
-    extract::{Extension, Query},
-    http::StatusCode,
-    response::{IntoResponse, Redirect},
+    extract::{Extension, Query, rejection::FailedToDeserializeQueryString},
+    http::{StatusCode, HeaderValue, HeaderName},
+    response::{IntoResponse, Redirect, Headers},
     routing::get,
     Json, Router,
 };
+use futures::{Future, stream};
+use oauth2::AuthUrl;
+use reqwest::header::ValueIter;
 use serde::Deserialize;
-use std::net::SocketAddr;
+use url::Url;
+use std::{net::SocketAddr, iter};
 use std::sync::{Arc, Mutex};
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::prelude::*;
 
-use twitter_v2::{authorization::{Oauth2Client, Oauth2Token, Scope, BearerToken}, query::TweetField};
+use twitter_v2::{authorization::{Oauth2Client, Oauth2Token, Scope, BearerToken}, query::TweetField, data::List};
 use twitter_v2::oauth2::{AuthorizationCode, CsrfToken, PkceCodeChallenge, PkceCodeVerifier};
 use twitter_v2::TwitterApi;
 
@@ -98,14 +102,13 @@ async fn callback(
     Ok(Redirect::to("/my_get_tweet".parse().unwrap()))
 }
 
-async fn tweets(Extension(ctx): Extension<Arc<Mutex<Oauth2Ctx>>>) -> impl IntoResponse {
-    // get oauth token
+async fn refresh_client_token(Extension(ctx): Extension<Arc<Mutex<Oauth2Ctx>>>) -> Option<(Oauth2Token, Oauth2Client)> {
     let (mut oauth_token, oauth_client) = {
         let ctx = ctx.lock().unwrap();
         let token = ctx
             .token
             .as_ref()
-            .ok_or_else(|| (StatusCode::UNAUTHORIZED, "User not logged in!".to_string()))?
+            .ok_or_else(|| (StatusCode::UNAUTHORIZED, "User not logged in!".to_string())).ok()?
             .clone();
         let client = ctx.client.clone();
         (token, client)
@@ -114,11 +117,68 @@ async fn tweets(Extension(ctx): Extension<Arc<Mutex<Oauth2Ctx>>>) -> impl IntoRe
     if oauth_client
         .refresh_token_if_expired(&mut oauth_token)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())).ok()?
     {
         // save oauth token if refreshed
         ctx.lock().unwrap().token = Some(oauth_token.clone());
     }
+    Some((oauth_token, oauth_client))
+}
+
+async fn get_headers(url: Url) -> impl Vec<&'static HeaderValue> {
+    let asdf = reqwest::get(url.to_string().clone())
+        .await.ok()
+        .headers()
+        .iter()
+        //.fold::<Vec<HeaderValue>, HeaderValue>(vec![], |acc: Vec<HeaderValue>, x: HeaderValue| { 
+        .map(|x| x.1)
+        //.fold::<Vec<&HeaderValue>, &HeaderValue>(vec![], |mut acc: Vec<&HeaderValue>, x: &HeaderValue| { 
+        .fold(vec![], |mut acc: Vec<&HeaderValue>, x: &HeaderValue| { 
+            acc.push(x);
+            acc
+        })
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())).ok()?
+        ;
+    asdf
+    // headers
+    // let to_print = headers.into_iter();
+    // // headers.for_each(|x| tracing::info!("{:?}\n", x));
+    // to_print.cloned().for_each(|x| tracing::info!("{:?}\n", x));
+
+    // // headers.fold::<Vec<&'static HeaderValue>, &HeaderValue>(vec![], |acc: &'static HeaderValue, x: &&HeaderValue| { 
+    // // headers
+    // //     .iter()
+    // //     .map(|x| *x)
+    // //     .fold(vec![], |mut acc, x| { 
+    // //         acc.push(x);
+    // //         acc
+    // //     })
+    // to_print.map(|x: (&HeaderName, &HeaderValue)|  x.1).into_iter()
+    // headers.into_iter()
+}
+
+async fn tweets(Extension(ctx): Extension<Arc<Mutex<Oauth2Ctx>>>) -> impl IntoResponse {
+    // get oauth token
+    let (oauth_token, oauth_client) = refresh_client_token(Extension(ctx)).await.unwrap();
+    // let (mut oauth_token, oauth_client) = {
+    //     let ctx = ctx.lock().unwrap();
+    //     let token = ctx
+    //         .token
+    //         .as_ref()
+    //         .ok_or_else(|| (StatusCode::UNAUTHORIZED, "User not logged in!".to_string()))?
+    //         .clone();
+    //     let client = ctx.client.clone();
+    //     (token, client)
+    // };
+    // // refresh oauth token if expired
+    // if oauth_client
+    //     .refresh_token_if_expired(&mut oauth_token)
+    //     .await
+    //     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    // {
+    //     // save oauth token if refreshed
+    //     ctx.lock().unwrap().token = Some(oauth_token.clone());
+    // }
 
     // oauth_client.request_token(code, verifier)
 
@@ -131,9 +191,27 @@ async fn tweets(Extension(ctx): Extension<Arc<Mutex<Oauth2Ctx>>>) -> impl IntoRe
     //     .ok_or_else(|| (StatusCode::UNAUTHORIZED, "User not logged in!".to_string()))?
     //     .clone();
 
+    //oauth_client.request_token(code, verifier)
+    let scopes = vec!["tweet.read","tweet.write","user.read","offline.access"];
+    let scopes = scopes.into_iter().map(|x| Scope::try_from(x).unwrap());
+    // let scopes: [&str;4] = iter::<&'static str>all;
+    
+    let asdfcode: AuthorizationCode;
+    
+    let (challenge, verifier) = PkceCodeChallenge::new_random_sha256_len(32);
+    let (url, csfr) = oauth_client.auth_url(challenge, scopes);
+    
 
 
-    let api = TwitterApi::new(oauth_token);
+    let token = oauth_token.clone();
+    //let token = ctx.as_ref().lock().unwrap().token.unwrap();
+        // .request_token(AuthorizationCode::new("code".to_string()), verifier)
+        // .await
+        // .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    // set context for use with twitter API
+    // ctx.to_owned().as_ref().lock().unwrap().token = Some(token);
+
+    let api = TwitterApi::new(token);
     // get tweet by id
     //.with_user_ctx()
     //.await?
@@ -190,10 +268,21 @@ async fn my_get_tweet(Extension(ctx): Extension<Arc<Mutex<Oauth2Ctx>>>) -> impl 
         .ok_or_else(|| (StatusCode::UNAUTHORIZED, "User not logged in!".to_string()))?
         .access_token()
         .clone();
-    // BearerToken::new(std::format!("{:?}",
-    tracing::info!("Bearer token: {:?}", bearer_token.secret());
+    // // BearerToken::new(std::format!("{:?}",
+    // tracing::info!("Bearer token: {:?}", bearer_token.secret());
 
-    let tweet = TwitterApi::new(BearerToken::new(bearer_token.secret()))
+    // let oauth2_token = Oauth2Token {
+    //     access_token: bearer_token.token(),
+    //     refresh_token: 
+    // }
+
+    //let bearer_token = //ctx.as_ref().lock().unwrap().token.unwrap().access_token();
+    //let bearer_token = ctx.lock().unwrap().token.as_ref().access_token();
+    // let client_id = ctx.lock().unwrap().token.into();
+    let (mut oauth_token, oauth_client) = refresh_client_token(Extension(ctx)).await.unwrap();
+    //oauth_client.auth_url(challenge, scopes);
+
+    let tweet = TwitterApi::new(oauth_token)
         .get_tweet(1261326399320715264)
         .tweet_fields([TweetField::AuthorId, TweetField::CreatedAt])
         .send()
