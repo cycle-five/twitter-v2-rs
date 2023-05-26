@@ -1,21 +1,18 @@
 use axum::{
-    extract::{Extension, Query, rejection::FailedToDeserializeQueryString},
-    http::{StatusCode, HeaderValue, HeaderName},
-    response::{IntoResponse, Redirect, Headers},
+    extract::{Extension, Query},
+    http::{StatusCode, HeaderValue},
+    response::{IntoResponse, Redirect},
     routing::get,
     Json, Router,
 };
-use futures::{Future, stream};
-use oauth2::AuthUrl;
-use reqwest::header::ValueIter;
 use serde::Deserialize;
 use url::Url;
-use std::{net::SocketAddr, iter};
+use std::{net::SocketAddr};
 use std::sync::{Arc, Mutex};
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::prelude::*;
 
-use twitter_v2::{authorization::{Oauth2Client, Oauth2Token, Scope, BearerToken}, query::TweetField, data::List};
+use twitter_v2::{authorization::{Oauth2Client, Oauth2Token, Scope}, query::TweetField};
 use twitter_v2::oauth2::{AuthorizationCode, CsrfToken, PkceCodeChallenge, PkceCodeVerifier};
 use twitter_v2::TwitterApi;
 
@@ -71,14 +68,14 @@ async fn callback(
                 "No previous state found".to_string(),
             )
         })?;
-        // // check state returned to see if it matches, otherwise throw an error
+        // check state returned to see if it matches, otherwise throw an error
         if state.secret() != saved_state.secret() {
             return Err((
                 StatusCode::BAD_REQUEST,
                 "Invalid state returned".to_string(),
             ));
         }
-        // // get verifier from ctx
+        // get verifier from ctx
         let verifier = ctx.verifier.take().ok_or_else(|| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -97,8 +94,6 @@ async fn callback(
     // set context for use with twitter API
     ctx.lock().unwrap().token = Some(token);
 
-    // Ok(Redirect::to("/debug_token".parse().unwrap()))
-    //Ok(Redirect::to("/tweets".parse().unwrap()))
     Ok(Redirect::to("/my_get_tweet".parse().unwrap()))
 }
 
@@ -125,36 +120,15 @@ async fn refresh_client_token(Extension(ctx): Extension<Arc<Mutex<Oauth2Ctx>>>) 
     Some((oauth_token, oauth_client))
 }
 
-async fn get_headers(url: Url) -> impl Vec<&'static HeaderValue> {
-    let asdf = reqwest::get(url.to_string().clone())
-        .await.ok()
-        .headers()
-        .iter()
-        //.fold::<Vec<HeaderValue>, HeaderValue>(vec![], |acc: Vec<HeaderValue>, x: HeaderValue| { 
-        .map(|x| x.1)
-        //.fold::<Vec<&HeaderValue>, &HeaderValue>(vec![], |mut acc: Vec<&HeaderValue>, x: &HeaderValue| { 
-        .fold(vec![], |mut acc: Vec<&HeaderValue>, x: &HeaderValue| { 
-            acc.push(x);
-            acc
-        })
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())).ok()?
-        ;
-    asdf
-    // headers
-    // let to_print = headers.into_iter();
-    // // headers.for_each(|x| tracing::info!("{:?}\n", x));
-    // to_print.cloned().for_each(|x| tracing::info!("{:?}\n", x));
+async fn get_headers(url: Url) -> Result<Vec<HeaderValue>, reqwest::Error> {
+    let response = reqwest::get(url).await?;
 
-    // // headers.fold::<Vec<&'static HeaderValue>, &HeaderValue>(vec![], |acc: &'static HeaderValue, x: &&HeaderValue| { 
-    // // headers
-    // //     .iter()
-    // //     .map(|x| *x)
-    // //     .fold(vec![], |mut acc, x| { 
-    // //         acc.push(x);
-    // //         acc
-    // //     })
-    // to_print.map(|x: (&HeaderName, &HeaderValue)|  x.1).into_iter()
-    // headers.into_iter()
+    let headers = response.headers()
+        .iter()
+        .map(|(_, v)| v.to_owned())
+        .collect();
+
+    Ok(headers)
 }
 
 async fn tweets(Extension(ctx): Extension<Arc<Mutex<Oauth2Ctx>>>) -> impl IntoResponse {
@@ -180,6 +154,7 @@ async fn tweets(Extension(ctx): Extension<Arc<Mutex<Oauth2Ctx>>>) -> impl IntoRe
     //     ctx.lock().unwrap().token = Some(oauth_token.clone());
     // }
 
+    // get_headers(url)
     // oauth_client.request_token(code, verifier)
 
 
@@ -196,12 +171,16 @@ async fn tweets(Extension(ctx): Extension<Arc<Mutex<Oauth2Ctx>>>) -> impl IntoRe
     let scopes = scopes.into_iter().map(|x| Scope::try_from(x).unwrap());
     // let scopes: [&str;4] = iter::<&'static str>all;
     
-    let asdfcode: AuthorizationCode;
+    // let asdfcode: AuthorizationCode;
     
     let (challenge, verifier) = PkceCodeChallenge::new_random_sha256_len(32);
     let (url, csfr) = oauth_client.auth_url(challenge, scopes);
     
+    let headers = get_headers(url).await.ok();
 
+    for ele in headers {
+        println!("{:?}", ele);
+    }
 
     let token = oauth_token.clone();
     //let token = ctx.as_ref().lock().unwrap().token.unwrap();
@@ -215,7 +194,7 @@ async fn tweets(Extension(ctx): Extension<Arc<Mutex<Oauth2Ctx>>>) -> impl IntoRe
     // get tweet by id
     //.with_user_ctx()
     //.await?
-    //.get_my_tweets()
+    //.get_my_tweet()
     let tweet = api
         .get_tweet(20)
         .send()

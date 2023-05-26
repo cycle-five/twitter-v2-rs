@@ -1,4 +1,3 @@
-use pretty_assertions::assert_eq;
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
