@@ -2,3 +2,4 @@
 /Cargo.lock
 .env
 .oauth2_token.json
+.vscode
